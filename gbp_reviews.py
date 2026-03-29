@@ -110,6 +110,15 @@ def authenticate():
                 )
                 sys.exit(1)
 
+            # In CI (GitHub Actions) there is no browser — exit with a clear message
+            if os.getenv("CI"):
+                logger.error(
+                    "Running in CI but no valid token found. "
+                    "Run the script locally first to generate token.json, "
+                    "then save its contents as the GOOGLE_TOKEN GitHub Secret."
+                )
+                sys.exit(1)
+
             logger.info("No saved token — opening browser for Google sign-in...")
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(CREDENTIALS_FILE), SCOPES

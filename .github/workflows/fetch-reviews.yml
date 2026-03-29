@@ -1,0 +1,108 @@
+# ---------------------------------------------------------------
+# GBP Reviews → Slack Alerts  (runs every 10 minutes for free)
+# ---------------------------------------------------------------
+# Required GitHub Secrets:
+#   SLACK_WEBHOOK_URL  – Slack incoming-webhook URL
+#   GOOGLE_TOKEN       – Contents of token.json (from local first-run)
+# ---------------------------------------------------------------
+
+name: Fetch GBP Reviews
+
+on:
+  # Run every 10 minutes
+  # NOTE: GitHub may delay cron jobs by a few minutes on free-tier.
+  # Actual interval is ~10-15 min, which is fine for review alerts.
+  schedule:
+    - cron: "*/10 * * * *"
+
+  # Allow manual trigger from the Actions tab (useful for testing)
+  workflow_dispatch:
+
+# Only allow one run at a time — skip queued runs if one is in progress
+concurrency:
+  group: gbp-reviews
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fetch-reviews:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # ── 1. Check out the repo ──────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ───────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 3. Restore token.json ──────────────────────────────────
+      # First try the cache (may contain a fresher refreshed token),
+      # then fall back to the GitHub Secret (original token).
+      - name: Restore cached token
+        id: cache-token
+        uses: actions/cache/restore@v4
+        with:
+          path: token.json
+          key: google-token-dummy
+          restore-keys: |
+            google-token-
+
+      - name: Fall back to token from secret
+        if: steps.cache-token.outputs.cache-hit != 'true'
+        run: echo '${{ secrets.GOOGLE_TOKEN }}' > token.json
+
+      # ── 4. Restore processed_reviews.json from cache ───────────
+      # This keeps track of which reviews were already posted.
+      # Without this, every run would re-post old reviews.
+      - name: Restore processed reviews state
+        id: cache-state
+        uses: actions/cache/restore@v4
+        with:
+          path: processed_reviews.json
+          key: processed-reviews-dummy
+          restore-keys: |
+            processed-reviews-
+
+      # ── 5. Run the script ──────────────────────────────────────
+      - name: Fetch reviews and post to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python gbp_reviews.py
+
+      # ── 6. Save processed_reviews.json to cache ────────────────
+      # Uses a unique key per run so the cache is always updated.
+      - name: Save processed reviews state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: processed_reviews.json
+          key: processed-reviews-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # ── 7. Save refreshed token.json to cache ──────────────────
+      # If the Google token was refreshed during this run, we
+      # cache the new version so the NEXT run can use it.
+      # (The secret holds the original; the cache holds the latest.)
+      - name: Save refreshed token
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: token.json
+          key: google-token-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # ── 8. Print run summary ───────────────────────────────────
+      - name: Show log output
+        if: always()
+        run: |
+          echo "── reviews_log.txt ──"
+          cat reviews_log.txt 2>/dev/null || echo "(no log file)"
