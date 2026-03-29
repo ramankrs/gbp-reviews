@@ -1,0 +1,19 @@
+# Google OAuth credentials & tokens — NEVER commit these
+credentials.json
+token.json
+
+# Runtime data
+processed_reviews.json
+reviews_log.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
