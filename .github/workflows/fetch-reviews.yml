@@ -13,7 +13,7 @@ on:
   # NOTE: GitHub may delay cron jobs by a few minutes on free-tier.
   # Actual interval is ~10-15 min, which is fine for review alerts.
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 */4 * * *"
 
   # Allow manual trigger from the Actions tab (useful for testing)
   workflow_dispatch:
