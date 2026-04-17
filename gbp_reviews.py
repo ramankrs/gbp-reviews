@@ -197,6 +197,22 @@ def get_reviews(creds, account_name, location_name):
 
         url = f"{GBP_REVIEWS_API}/{account_name}/{location_name}/reviews"
         resp = requests.get(url, headers=headers, params=params, timeout=30)
+
+        if resp.status_code == 403:
+            logger.error(
+                "    ⚠ 403 Forbidden when fetching reviews for %s/%s",
+                account_name,
+                location_name,
+            )
+            logger.error(
+                "    FIX: Enable the 'Google My Business API' in Google Cloud Console:\n"
+                "         1. Go to https://console.cloud.google.com/apis/library\n"
+                "         2. Search for 'Google My Business API'\n"
+                "         3. Click Enable\n"
+                "         4. Make sure your OAuth credentials belong to the same project"
+            )
+            raise requests.exceptions.HTTPError(response=resp)
+
         resp.raise_for_status()
         data = resp.json()
 
@@ -331,14 +347,22 @@ def main():
         logger.info("Account: %s (%s)", account.get("accountName", ""), account_name)
 
         locations = get_locations(creds, account_name)
-        logger.info("  Found %d location(s)", len(locations))
+        logger.info("  Found %d location(s):", len(locations))
+        for i, loc in enumerate(locations, 1):
+            logger.info(
+                "    [%d/%d] %s  (id: %s)",
+                i,
+                len(locations),
+                loc.get("title", "—"),
+                loc["name"],
+            )
         total_locations += len(locations)
 
         # Step 4: Fetch and process reviews for each location
         for location in locations:
             loc_name = location["name"]
             loc_title = location.get("title", loc_name)
-            logger.info("  Checking: %s", loc_title)
+            logger.info("  Checking: %s (%s)", loc_title, loc_name)
 
             try:
                 reviews = get_reviews(creds, account_name, loc_name)
