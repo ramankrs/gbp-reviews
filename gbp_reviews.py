@@ -324,12 +324,12 @@ def send_test_message():
     dummy_review = {
         "starRating": "FIVE",
         "reviewer": {"displayName": "Priya Sharma"},
-        "comment": "Wonderful experience! The doctor was very thorough and the staff was super friendly. Highly recommend this clinic.",
+        "comment": "Wonderful experience. The doctor was very patient and thorough with my daughter.",
         "createTime": datetime.now(timezone.utc).isoformat(),
     }
 
     logger.info("Sending test review to Slack...")
-    post_to_slack("Downtown Wellness Clinic", dummy_review)
+    post_to_slack("BabyMD - The Children's Clinic - HSR Layout", dummy_review)
 
     dummy_no_text = {
         "starRating": "THREE",
@@ -339,7 +339,7 @@ def send_test_message():
     }
 
     logger.info("Sending test review (no text) to Slack...")
-    post_to_slack("Lakeside Family Clinic", dummy_no_text)
+    post_to_slack("Anjana Child Care by BabyMD - Electronic City", dummy_no_text)
 
     logger.info("Done — check your Slack channel.")
 
