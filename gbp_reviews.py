@@ -49,15 +49,16 @@ GBP_API_BASE = "https://mybusinessbusinessinformation.googleapis.com/v1"
 GBP_ACCOUNT_API = "https://mybusinessaccountmanagement.googleapis.com/v1"
 GBP_REVIEWS_API = "https://mybusiness.googleapis.com/v4"
 
-# Star-rating display map
-STAR_MAP = {
-    "STAR_RATING_UNSPECIFIED": "☆",
-    "ONE": "⭐",
-    "TWO": "⭐⭐",
-    "THREE": "⭐⭐⭐",
-    "FOUR": "⭐⭐⭐⭐",
-    "FIVE": "⭐⭐⭐⭐⭐",
+STAR_COUNTS = {
+    "STAR_RATING_UNSPECIFIED": 0,
+    "ONE": 1,
+    "TWO": 2,
+    "THREE": 3,
+    "FOUR": 4,
+    "FIVE": 5,
 }
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -259,40 +260,56 @@ def save_processed(state):
 
 
 def post_to_slack(location_title, review):
-    """Send a single formatted review alert to Slack."""
-    rating = STAR_MAP.get(review.get("starRating", ""), "☆")
+    """Send a single formatted review alert to Slack via Block Kit."""
+    star_count = STAR_COUNTS.get(review.get("starRating", ""), 0)
+    stars = "\u2b50\ufe0f" * star_count if star_count else "\u2606"
     reviewer = review.get("reviewer", {}).get("displayName", "Anonymous")
     comment = review.get("comment", "").strip()
     create_time = review.get("createTime", "")
 
-    # Format the timestamp for display
     try:
         dt = datetime.fromisoformat(create_time.replace("Z", "+00:00"))
-        time_display = dt.strftime("%b %d, %Y at %I:%M %p %Z")
+        dt_ist = dt.astimezone(IST)
+        time_display = dt_ist.strftime("%b %d, %Y at %I:%M %p") + " IST"
     except (ValueError, AttributeError):
         time_display = create_time
 
-    # Handle reviews with no text (star-rating only)
+    lines = [
+        f"\U0001f4e2 *New Review*",
+        "────────────────────",
+        "",
+        f"\U0001f4cd {location_title}",
+        f"\u23f0 {time_display}",
+        "",
+        stars,
+        "",
+        f"\U0001f464 {reviewer}",
+    ]
+
     if comment:
-        comment_line = f'💬 "{comment}"'
-    else:
-        comment_line = "💬 _(No written review — star rating only)_"
+        lines.append(f'\U0001f4ac "{comment}"')
 
-    message = (
-        f"{rating} *New Review — {location_title}*\n"
-        f"👤 {reviewer}\n"
-        f"{comment_line}\n"
-        f"🕐 {time_display}\n"
-        f"👉 <https://business.google.com/reviews|Reply to this review>"
-    )
+    lines += [
+        "",
+        "────────────────────",
+        "",
+        f"<https://business.google.com/reviews|Reply to this review \u2934\ufe0f>",
+    ]
 
-    payload = {"text": message}
+    message_text = "\n".join(lines)
+
+    payload = {
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": message_text}},
+        ],
+        "text": f"New review for {location_title} by {reviewer}",
+    }
     resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=15)
 
     if resp.status_code != 200:
         logger.warning("Slack post failed (%s): %s", resp.status_code, resp.text)
     else:
-        logger.info("  → Slack alert sent for review by %s", reviewer)
+        logger.info("  \u2192 Slack alert sent for review by %s", reviewer)
 
 
 # ---------------------------------------------------------------------------
