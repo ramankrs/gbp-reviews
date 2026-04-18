@@ -274,10 +274,9 @@ def post_to_slack(location_title, review):
     except (ValueError, AttributeError):
         time_display = create_time
 
-    lines = [
-        f"\U0001f4e2 *New Review*",
-        "────────────────────",
-        "",
+    header = "\U0001f4e2 *New Review*"
+
+    detail_lines = [
         f"\U0001f4cd {location_title}",
         f"\u23f0 {time_display}",
         "",
@@ -285,22 +284,18 @@ def post_to_slack(location_title, review):
         "",
         f"\U0001f464 {reviewer}",
     ]
-
     if comment:
-        lines.append(f'\U0001f4ac "{comment}"')
+        detail_lines.append(f'\U0001f4ac "{comment}"')
 
-    lines += [
-        "",
-        "────────────────────",
-        "",
-        f"<https://business.google.com/reviews|Reply to this review \u2934\ufe0f>",
-    ]
-
-    message_text = "\n".join(lines)
+    footer = f"<https://business.google.com/reviews|Reply to this review \u2934\ufe0f>"
 
     payload = {
         "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": message_text}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": header}},
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(detail_lines)}},
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": footer}},
         ],
         "text": f"New review for {location_title} by {reviewer}",
     }
