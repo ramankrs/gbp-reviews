@@ -296,6 +296,7 @@ def post_to_slack(location_title, review):
             {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(detail_lines)}},
             {"type": "divider"},
             {"type": "section", "text": {"type": "mrkdwn", "text": footer}},
+            {"type": "divider"},
         ],
         "text": f"New review for {location_title} by {reviewer}",
     }
