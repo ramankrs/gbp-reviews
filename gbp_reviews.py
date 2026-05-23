@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Google Business Profile Reviews → Slack Alerts
+Google Business Profile Reviews → Slack Alerts + Google Sheets Log
 
-Fetches new reviews from all GBP locations under your account
-and posts formatted alerts to a Slack channel via webhook.
+Fetches new reviews from all GBP locations under your account,
+posts formatted alerts to two Slack channels via webhook,
+and logs each review to a Google Sheet.
 
 Usage:
     python gbp_reviews.py              # Normal run
     python gbp_reviews.py --reset      # Clear tracking data and re-fetch last 7 days
+    python gbp_reviews.py --test       # Post dummy reviews to Slack to verify layout
 """
 
 import argparse
@@ -27,12 +29,19 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 # Configuration — edit these to match your setup
 # ---------------------------------------------------------------------------
 
-# OAuth scope needed to read GBP data
-SCOPES = ["https://www.googleapis.com/auth/business.manage"]
+# OAuth scopes — GBP for reviews, Sheets for logging
+SCOPES = [
+    "https://www.googleapis.com/auth/business.manage",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 
-# Slack incoming-webhook URL — set this as an environment variable
-# Example: export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+# Slack incoming-webhook URLs — both channels receive every review
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
+SLACK_WEBHOOK_URL_2 = os.getenv("SLACK_WEBHOOK_URL_2", "")
+
+# Google Sheet for review logging
+SPREADSHEET_ID = "1tuxKTxlyQP99v0ELIfDul514CLiIiJSamVLJo0qUN9A"
+SHEET_NAME = "Reviews"
 
 # File paths (stored next to this script)
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -48,6 +57,9 @@ INITIAL_LOOKBACK_DAYS = 7
 GBP_API_BASE = "https://mybusinessbusinessinformation.googleapis.com/v1"
 GBP_ACCOUNT_API = "https://mybusinessaccountmanagement.googleapis.com/v1"
 GBP_REVIEWS_API = "https://mybusiness.googleapis.com/v4"
+SHEETS_API_BASE = "https://sheets.googleapis.com/v4/spreadsheets"
+
+REVIEW_REPLY_URL = "https://business.google.com/reviews"
 
 STAR_COUNTS = {
     "STAR_RATING_UNSPECIFIED": 0,
@@ -259,8 +271,8 @@ def save_processed(state):
 # ---------------------------------------------------------------------------
 
 
-def post_to_slack(location_title, review):
-    """Send a single formatted review alert to Slack via Block Kit."""
+def _build_slack_payload(location_title, review):
+    """Build the Block Kit payload for a review alert."""
     star_count = STAR_COUNTS.get(review.get("starRating", ""), 0)
     stars = "\u2b50\ufe0f" * star_count if star_count else "\u2606"
     reviewer = review.get("reviewer", {}).get("displayName", "Anonymous")
@@ -287,9 +299,9 @@ def post_to_slack(location_title, review):
     if comment:
         detail_lines.append(f'\U0001f4ac "{comment}"')
 
-    footer = f"<https://business.google.com/reviews|Reply to this review \u2934\ufe0f>"
+    footer = f"<{REVIEW_REPLY_URL}|Reply to this review \u2934\ufe0f>"
 
-    payload = {
+    return {
         "blocks": [
             {"type": "section", "text": {"type": "mrkdwn", "text": header}},
             {"type": "divider"},
@@ -300,12 +312,77 @@ def post_to_slack(location_title, review):
         ],
         "text": f"New review for {location_title} by {reviewer}",
     }
-    resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=15)
 
-    if resp.status_code != 200:
-        logger.warning("Slack post failed (%s): %s", resp.status_code, resp.text)
-    else:
-        logger.info("  \u2192 Slack alert sent for review by %s", reviewer)
+
+def post_to_slack(location_title, review):
+    """Send a review alert to all configured Slack channels."""
+    payload = _build_slack_payload(location_title, review)
+    reviewer = review.get("reviewer", {}).get("displayName", "Anonymous")
+
+    webhooks = [
+        ("Channel 1", SLACK_WEBHOOK_URL),
+        ("Channel 2", SLACK_WEBHOOK_URL_2),
+    ]
+
+    for label, url in webhooks:
+        if not url:
+            continue
+        try:
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code != 200:
+                logger.warning(
+                    "  Slack %s failed (%s): %s", label, resp.status_code, resp.text
+                )
+            else:
+                logger.info("  \u2192 Slack %s alert sent for review by %s", label, reviewer)
+        except requests.exceptions.RequestException as e:
+            logger.warning("  Slack %s request error: %s", label, e)
+
+
+# ---------------------------------------------------------------------------
+# Google Sheets logging
+# ---------------------------------------------------------------------------
+
+
+def log_to_sheet(creds, location_title, review):
+    """Append a review row to the Google Sheet."""
+    star_count = STAR_COUNTS.get(review.get("starRating", ""), 0)
+    reviewer = review.get("reviewer", {}).get("displayName", "Anonymous")
+    comment = review.get("comment", "").strip()
+
+    now_ist = datetime.now(timezone.utc).astimezone(IST)
+    timestamp = now_ist.strftime("%b %d, %Y at %I:%M %p") + " IST"
+
+    row = [
+        timestamp,
+        location_title,
+        reviewer,
+        star_count,
+        comment,
+        "Pending",
+        REVIEW_REPLY_URL,
+    ]
+
+    url = f"{SHEETS_API_BASE}/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:G:append"
+    params = {"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"}
+    headers = {
+        "Authorization": f"Bearer {creds.token}",
+        "Content-Type": "application/json",
+    }
+    body = {"values": [row]}
+
+    try:
+        resp = requests.post(
+            url, headers=headers, params=params, json=body, timeout=15
+        )
+        if resp.status_code == 200:
+            logger.info("  → Logged to Google Sheet")
+        else:
+            logger.warning(
+                "  Sheet append failed (%s): %s", resp.status_code, resp.text
+            )
+    except requests.exceptions.RequestException as e:
+        logger.warning("  Sheet append error: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -314,11 +391,10 @@ def post_to_slack(location_title, review):
 
 
 def send_test_message():
-    """Post a dummy review to Slack to verify the message layout."""
-    if not SLACK_WEBHOOK_URL:
+    """Post dummy reviews to Slack to verify the message layout."""
+    if not SLACK_WEBHOOK_URL and not SLACK_WEBHOOK_URL_2:
         logger.error(
-            "SLACK_WEBHOOK_URL environment variable is not set. "
-            "Export it before running: export SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...'"
+            "No Slack webhook configured. Set SLACK_WEBHOOK_URL or SLACK_WEBHOOK_URL_2."
         )
         sys.exit(1)
 
@@ -366,11 +442,11 @@ def main():
     logger.info("=" * 50)
     logger.info("GBP Reviews Slack Alert — run started")
 
-    # Step 0: Verify Slack webhook is configured
-    if not SLACK_WEBHOOK_URL:
+    # Step 0: Verify at least one Slack webhook is configured
+    if not SLACK_WEBHOOK_URL and not SLACK_WEBHOOK_URL_2:
         logger.error(
-            "SLACK_WEBHOOK_URL environment variable is not set. "
-            "Export it before running: export SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...'"
+            "No Slack webhook configured. "
+            "Set SLACK_WEBHOOK_URL and/or SLACK_WEBHOOK_URL_2."
         )
         sys.exit(1)
 
@@ -445,8 +521,9 @@ def main():
                 if review_time <= cutoff:
                     continue
 
-                # This is a new review — post to Slack!
+                # This is a new review — post to Slack and log to Sheet!
                 post_to_slack(loc_title, review)
+                log_to_sheet(creds, loc_title, review)
                 state["review_ids"].add(review_id)
                 new_count += 1
 

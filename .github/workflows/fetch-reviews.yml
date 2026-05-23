@@ -2,8 +2,9 @@
 # GBP Reviews → Slack Alerts  (runs every 10 minutes for free)
 # ---------------------------------------------------------------
 # Required GitHub Secrets:
-#   SLACK_WEBHOOK_URL  – Slack incoming-webhook URL
-#   GOOGLE_TOKEN       – Contents of token.json (from local first-run)
+#   SLACK_WEBHOOK_URL    – Slack incoming-webhook URL (Channel 1: #google-reviews)
+#   SLACK_WEBHOOK_URL_2  – Slack incoming-webhook URL (Channel 2: #gmb-reviews)
+#   GOOGLE_TOKEN         – Contents of token.json (from local first-run)
 # ---------------------------------------------------------------
 
 name: Fetch GBP Reviews
@@ -78,6 +79,7 @@ jobs:
       - name: Fetch reviews and post to Slack
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL_2: ${{ secrets.SLACK_WEBHOOK_URL_2 }}
         run: python gbp_reviews.py
 
       # ── 6. Save processed_reviews.json to cache ────────────────
