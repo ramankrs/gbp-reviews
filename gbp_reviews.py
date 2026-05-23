@@ -351,7 +351,7 @@ def log_to_sheet(creds, location_title, review):
     comment = review.get("comment", "").strip()
 
     now_ist = datetime.now(timezone.utc).astimezone(IST)
-    timestamp = now_ist.strftime("%b %d, %Y at %I:%M %p") + " IST"
+    timestamp = now_ist.strftime("%b %d, %Y %I:%M %p") + " IST"
 
     row = [
         timestamp,
