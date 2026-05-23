@@ -391,34 +391,43 @@ def log_to_sheet(creds, location_title, review):
 
 
 def send_test_message():
-    """Post dummy reviews to Slack to verify the message layout."""
+    """Post dummy reviews to Slack and Google Sheet to verify the full pipeline."""
     if not SLACK_WEBHOOK_URL and not SLACK_WEBHOOK_URL_2:
         logger.error(
             "No Slack webhook configured. Set SLACK_WEBHOOK_URL or SLACK_WEBHOOK_URL_2."
         )
         sys.exit(1)
 
-    dummy_review = {
-        "starRating": "FIVE",
-        "reviewer": {"displayName": "Priya Sharma"},
-        "comment": "Wonderful experience. The doctor was very patient and thorough with my daughter.",
-        "createTime": datetime.now(timezone.utc).isoformat(),
-    }
+    creds = authenticate()
 
-    logger.info("Sending test review to Slack...")
-    post_to_slack("BabyMD - The Children's Clinic - HSR Layout", dummy_review)
+    test_reviews = [
+        (
+            "BabyMD - The Children's Clinic - HSR Layout",
+            {
+                "starRating": "FIVE",
+                "reviewer": {"displayName": "Priya Sharma"},
+                "comment": "Wonderful experience. The doctor was very patient and thorough with my daughter.",
+                "createTime": datetime.now(timezone.utc).isoformat(),
+            },
+        ),
+        (
+            "Anjana Child Care by BabyMD - Electronic City",
+            {
+                "starRating": "THREE",
+                "reviewer": {"displayName": "Amit Patel"},
+                "comment": "",
+                "createTime": datetime.now(timezone.utc).isoformat(),
+            },
+        ),
+    ]
 
-    dummy_no_text = {
-        "starRating": "THREE",
-        "reviewer": {"displayName": "Amit Patel"},
-        "comment": "",
-        "createTime": datetime.now(timezone.utc).isoformat(),
-    }
+    for clinic, review in test_reviews:
+        logger.info("Sending test review to Slack: %s", clinic)
+        post_to_slack(clinic, review)
+        logger.info("Logging test review to Google Sheet: %s", clinic)
+        log_to_sheet(creds, clinic, review)
 
-    logger.info("Sending test review (no text) to Slack...")
-    post_to_slack("Anjana Child Care by BabyMD - Electronic City", dummy_no_text)
-
-    logger.info("Done — check your Slack channel.")
+    logger.info("Done — check your Slack channels and Google Sheet.")
 
 
 def main():
