@@ -272,7 +272,7 @@ def save_processed(state):
 
 
 def _build_slack_payload(location_title, review):
-    """Build the Block Kit payload for a review alert."""
+    """Build the Block Kit payload for Channel 1 (#google-reviews)."""
     star_count = STAR_COUNTS.get(review.get("starRating", ""), 0)
     stars = "\u2b50\ufe0f" * star_count if star_count else "\u2606"
     reviewer = review.get("reviewer", {}).get("displayName", "Anonymous")
@@ -314,19 +314,49 @@ def _build_slack_payload(location_title, review):
     }
 
 
+def _build_slack_payload_plain(location_title, review):
+    """Build a plain-text payload for Channel 2 (#gmb-reviews)."""
+    star_count = STAR_COUNTS.get(review.get("starRating", ""), 0)
+    reviewer = review.get("reviewer", {}).get("displayName", "Anonymous")
+    comment = review.get("comment", "").strip()
+    create_time = review.get("createTime", "")
+
+    try:
+        dt = datetime.fromisoformat(create_time.replace("Z", "+00:00"))
+        dt_ist = dt.astimezone(IST)
+        time_display = dt_ist.strftime("%b %d %Y %H:%M:%S")
+    except (ValueError, AttributeError):
+        time_display = create_time
+
+    review_text = comment if comment else "No written review"
+
+    message = (
+        "\U0001f31f New Google Review!\n"
+        "\n"
+        f"Clinic: {location_title}\n"
+        f"City: Bengaluru\n"
+        f"Reviewer: {reviewer}\n"
+        f"Rating: {star_count}\n"
+        f"Review: {review_text}\n"
+        f"Received at: {time_display}"
+    )
+
+    return {"text": message}
+
+
 def post_to_slack(location_title, review):
     """Send a review alert to all configured Slack channels."""
-    payload = _build_slack_payload(location_title, review)
     reviewer = review.get("reviewer", {}).get("displayName", "Anonymous")
 
-    webhooks = [
-        ("Channel 1", SLACK_WEBHOOK_URL),
-        ("Channel 2", SLACK_WEBHOOK_URL_2),
+    channels = [
+        ("Channel 1", SLACK_WEBHOOK_URL, _build_slack_payload),
+        ("Channel 2", SLACK_WEBHOOK_URL_2, _build_slack_payload_plain),
     ]
 
-    for label, url in webhooks:
+    for label, url, builder in channels:
         if not url:
             continue
+        payload = builder(location_title, review)
         try:
             resp = requests.post(url, json=payload, timeout=15)
             if resp.status_code != 200:
