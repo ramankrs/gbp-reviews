@@ -7,9 +7,10 @@ posts formatted alerts to two Slack channels via webhook,
 and logs each review to a Google Sheet.
 
 Usage:
-    python gbp_reviews.py              # Normal run
-    python gbp_reviews.py --reset      # Clear tracking data and re-fetch last 7 days
-    python gbp_reviews.py --test       # Post dummy reviews to Slack to verify layout
+    python gbp_reviews.py                # Normal run
+    python gbp_reviews.py --reset        # Clear tracking data and re-fetch last 7 days
+    python gbp_reviews.py --test         # Post dummy reviews + summary to verify layout
+    python gbp_reviews.py --daily-summary  # Post daily review summary to Slack
 """
 
 import argparse
@@ -71,6 +72,31 @@ STAR_COUNTS = {
 }
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# Keyword → short display name for the 7 clinics in the daily summary.
+# First matching keyword wins, so order matters (longer/specific first).
+CLINIC_KEYWORDS = [
+    ("Kasavanahalli", "Kasavanahalli"),
+    ("Hosa Road",     "Kasavanahalli"),
+    ("Kasav",         "Kasavanahalli"),
+    ("Electronic City", "Electronic City"),
+    ("Bellandur",     "Bellandur"),
+    ("Varthur",       "Varthur"),
+    ("HSR",           "HSR Layout"),
+    ("Yelahanka",     "Yelahanka"),
+    ("Thanisandra",   "Thanisandra"),
+]
+
+# Display order in the summary table
+SUMMARY_CLINICS = [
+    "HSR Layout",
+    "Bellandur",
+    "Varthur",
+    "Kasavanahalli",
+    "Electronic City",
+    "Yelahanka",
+    "Thanisandra",
+]
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -241,6 +267,77 @@ def get_reviews(creds, account_name, location_name):
     return reviews
 
 
+def get_clinic_short_name(location_title):
+    """Return the short display name for a location, or None if not one of the 7 clinics."""
+    title_lower = location_title.lower()
+    for keyword, short_name in CLINIC_KEYWORDS:
+        if keyword.lower() in title_lower:
+            return short_name
+    return None
+
+
+def get_location_avg_rating(creds, account_name, location_name):
+    """Fetch the overall average star rating for a location from the GBP API."""
+    headers = {"Authorization": f"Bearer {creds.token}"}
+    url = f"{GBP_REVIEWS_API}/{account_name}/{location_name}/reviews"
+    try:
+        resp = requests.get(url, headers=headers, params={"pageSize": 1}, timeout=30)
+        if resp.status_code == 200:
+            return resp.json().get("averageRating")
+    except requests.exceptions.RequestException:
+        pass
+    return None
+
+
+def fetch_reviews_since(creds, account_name, location_name, since_dt):
+    """
+    Fetch reviews for a location, stopping once we've collected enough
+    to cover the window starting at since_dt. Capped at 1 000 reviews
+    (20 pages × 50) to prevent runaway pagination on busy locations.
+    """
+    headers = {"Authorization": f"Bearer {creds.token}"}
+    reviews = []
+    page_token = None
+    page_count = 0
+
+    while page_count < 20:
+        page_count += 1
+        params = {"pageSize": 50, "orderBy": "updateTime desc"}
+        if page_token:
+            params["pageToken"] = page_token
+
+        url = f"{GBP_REVIEWS_API}/{account_name}/{location_name}/reviews"
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+
+        if resp.status_code == 403:
+            raise requests.exceptions.HTTPError(response=resp)
+        resp.raise_for_status()
+        data = resp.json()
+
+        batch = data.get("reviews", [])
+        if not batch:
+            break
+
+        reviews.extend(batch)
+
+        # Stop paginating once the oldest createTime in this batch is before our window.
+        # (updateTime ordering means a very old review with a recent reply may appear
+        # near the top — we still collect it and let the caller filter by createTime.)
+        oldest_str = batch[-1].get("createTime", "")
+        try:
+            oldest_dt = datetime.fromisoformat(oldest_str.replace("Z", "+00:00"))
+            if oldest_dt < since_dt:
+                break
+        except (ValueError, AttributeError):
+            pass
+
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+    return reviews
+
+
 # ---------------------------------------------------------------------------
 # Processed-reviews tracker (prevents duplicate Slack posts)
 # ---------------------------------------------------------------------------
@@ -369,6 +466,55 @@ def post_to_slack(location_title, review):
             logger.warning("  Slack %s request error: %s", label, e)
 
 
+def post_daily_summary_to_slack(date_display, clinic_rows, totals_row):
+    """
+    Format and post the daily summary table to Slack Channel 1 (#google-reviews).
+
+    clinic_rows: list of dicts with keys:
+        name, yesterday, s5, s4, s3, s2, s1, mtd, avg
+    totals_row: same keys, representing column sums/weighted avg
+    """
+    if not SLACK_WEBHOOK_URL:
+        logger.warning("SLACK_WEBHOOK_URL not set — daily summary not posted.")
+        return
+
+    C = 16  # clinic column width (longest name: "Electronic City" = 15 chars)
+
+    header_row = (
+        f"{'Clinic':<{C}}  {'Yday':>4}  {'5★':>3}  {'4★':>3}  "
+        f"{'3★':>3}  {'2★':>3}  {'1★':>3}  {'MTD':>5}  {'Avg':>4}"
+    )
+    divider = "─" * len(header_row)
+
+    def fmt_row(r):
+        return (
+            f"{r['name']:<{C}}  {r['yesterday']:>4}  {r['s5']:>3}  {r['s4']:>3}  "
+            f"{r['s3']:>3}  {r['s2']:>3}  {r['s1']:>3}  {r['mtd']:>5}  {r['avg']:>4}"
+        )
+
+    table_lines = [header_row, divider]
+    for row in clinic_rows:
+        table_lines.append(fmt_row(row))
+    table_lines.append(divider)
+    table_lines.append(fmt_row({**totals_row, "name": "TOTAL"}))
+
+    message = (
+        f"📊 *Daily Reviews Summary — {date_display}*\n\n"
+        "```\n" + "\n".join(table_lines) + "\n```\n\n"
+        "_Posted daily at 8:00 AM IST by Verbato_"
+    )
+
+    payload = {"text": message}
+    try:
+        resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=15)
+        if resp.status_code != 200:
+            logger.warning("Daily summary Slack post failed (%s): %s", resp.status_code, resp.text)
+        else:
+            logger.info("Daily summary posted to #google-reviews.")
+    except requests.exceptions.RequestException as e:
+        logger.warning("Daily summary Slack request error: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Google Sheets logging
 # ---------------------------------------------------------------------------
@@ -420,6 +566,155 @@ def log_to_sheet(creds, location_title, review):
 # ---------------------------------------------------------------------------
 
 
+def send_daily_summary(creds, accounts):
+    """
+    Fetch review counts for the 7 clinics and post a summary table to Slack.
+
+    Covers:
+      Yesterday — reviews whose createTime fell in the previous IST calendar day
+      MTD       — reviews since the 1st of the current month (IST) up to yesterday
+      Avg ★     — overall average from the GBP API; falls back to MTD average
+    """
+    now_ist = datetime.now(timezone.utc).astimezone(IST)
+    today_midnight = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_midnight = today_midnight - timedelta(days=1)
+    mtd_start = today_midnight.replace(day=1)
+    date_display = yesterday_midnight.strftime("%-d %b %Y")
+
+    logger.info("Daily summary: window %s → %s", yesterday_midnight.date(), today_midnight.date())
+
+    # Initialise per-clinic accumulators
+    stats = {
+        name: {
+            "yesterday": 0,
+            "s1": 0, "s2": 0, "s3": 0, "s4": 0, "s5": 0,
+            "mtd": 0, "mtd_sum": 0, "mtd_count": 0,
+            "api_avg": None,
+        }
+        for name in SUMMARY_CLINICS
+    }
+
+    for account in accounts:
+        account_name = account["name"]
+        try:
+            locations = get_locations(creds, account_name)
+        except requests.exceptions.HTTPError as e:
+            logger.warning("Could not fetch locations for %s: %s", account_name, e)
+            continue
+
+        for location in locations:
+            loc_name = location["name"]
+            loc_title = location.get("title", "")
+            short_name = get_clinic_short_name(loc_title)
+            if not short_name:
+                continue
+
+            logger.info("  Summary fetching: %s → %s", loc_title, short_name)
+            s = stats[short_name]
+
+            # Overall average from API (all-time, as shown on GBP)
+            s["api_avg"] = get_location_avg_rating(creds, account_name, loc_name)
+
+            # Reviews since start of month (covers both Yesterday and MTD windows)
+            try:
+                reviews = fetch_reviews_since(creds, account_name, loc_name, mtd_start)
+            except requests.exceptions.HTTPError as e:
+                logger.warning("    Could not fetch reviews for %s: %s", loc_title, e)
+                continue
+
+            for review in reviews:
+                ct_str = review.get("createTime", "")
+                try:
+                    review_dt = datetime.fromisoformat(
+                        ct_str.replace("Z", "+00:00")
+                    ).astimezone(IST)
+                except (ValueError, AttributeError):
+                    continue
+
+                star = STAR_COUNTS.get(review.get("starRating", ""), 0)
+
+                if mtd_start <= review_dt < today_midnight:
+                    s["mtd"] += 1
+                    s["mtd_sum"] += star
+                    s["mtd_count"] += 1
+
+                if yesterday_midnight <= review_dt < today_midnight:
+                    s["yesterday"] += 1
+                    if 1 <= star <= 5:
+                        s[f"s{star}"] += 1
+
+    # Build per-clinic rows and running totals
+    clinic_rows = []
+    tot = {"yesterday": 0, "s1": 0, "s2": 0, "s3": 0, "s4": 0, "s5": 0,
+           "mtd": 0, "mtd_sum": 0, "mtd_count": 0}
+
+    for name in SUMMARY_CLINICS:
+        s = stats[name]
+
+        if s["api_avg"] is not None:
+            avg_display = f"{s['api_avg']:.1f}"
+        elif s["mtd_count"]:
+            avg_display = f"{s['mtd_sum'] / s['mtd_count']:.1f}"
+        else:
+            avg_display = "—"
+
+        clinic_rows.append({
+            "name": name,
+            "yesterday": s["yesterday"],
+            "s5": s["s5"], "s4": s["s4"], "s3": s["s3"], "s2": s["s2"], "s1": s["s1"],
+            "mtd": s["mtd"],
+            "avg": avg_display,
+        })
+
+        tot["yesterday"] += s["yesterday"]
+        for k in (1, 2, 3, 4, 5):
+            tot[f"s{k}"] += s[f"s{k}"]
+        tot["mtd"] += s["mtd"]
+        tot["mtd_sum"] += s["mtd_sum"]
+        tot["mtd_count"] += s["mtd_count"]
+
+    # Total average: weighted by MTD review counts; fall back to simple mean of API avgs
+    if tot["mtd_count"]:
+        total_avg = f"{tot['mtd_sum'] / tot['mtd_count']:.1f}"
+    else:
+        api_avgs = [stats[n]["api_avg"] for n in SUMMARY_CLINICS if stats[n]["api_avg"] is not None]
+        total_avg = f"{sum(api_avgs) / len(api_avgs):.1f}" if api_avgs else "—"
+
+    totals_row = {
+        "name": "TOTAL",
+        "yesterday": tot["yesterday"],
+        "s5": tot["s5"], "s4": tot["s4"], "s3": tot["s3"], "s2": tot["s2"], "s1": tot["s1"],
+        "mtd": tot["mtd"],
+        "avg": total_avg,
+    }
+
+    post_daily_summary_to_slack(date_display, clinic_rows, totals_row)
+    logger.info("Daily summary complete.")
+
+
+def _test_daily_summary():
+    """Post a dummy daily summary to verify table formatting."""
+    yesterday = (datetime.now(timezone.utc).astimezone(IST) - timedelta(days=1))
+    date_display = yesterday.strftime("%-d %b %Y")
+
+    dummy_rows = [
+        {"name": "HSR Layout",       "yesterday": 3, "s5": 2, "s4": 1, "s3": 0, "s2": 0, "s1": 0, "mtd": 45,  "avg": "4.8"},
+        {"name": "Bellandur",        "yesterday": 0, "s5": 0, "s4": 0, "s3": 0, "s2": 0, "s1": 0, "mtd": 32,  "avg": "4.6"},
+        {"name": "Varthur",          "yesterday": 1, "s5": 1, "s4": 0, "s3": 0, "s2": 0, "s1": 0, "mtd": 18,  "avg": "4.7"},
+        {"name": "Kasavanahalli",    "yesterday": 0, "s5": 0, "s4": 0, "s3": 0, "s2": 0, "s1": 0, "mtd": 28,  "avg": "4.5"},
+        {"name": "Electronic City",  "yesterday": 2, "s5": 1, "s4": 0, "s3": 1, "s2": 0, "s1": 0, "mtd": 37,  "avg": "4.3"},
+        {"name": "Yelahanka",        "yesterday": 1, "s5": 1, "s4": 0, "s3": 0, "s2": 0, "s1": 0, "mtd": 22,  "avg": "4.9"},
+        {"name": "Thanisandra",      "yesterday": 0, "s5": 0, "s4": 0, "s3": 0, "s2": 0, "s1": 0, "mtd": 15,  "avg": "4.4"},
+    ]
+    dummy_totals = {
+        "name": "TOTAL",
+        "yesterday": 7, "s5": 5, "s4": 1, "s3": 1, "s2": 0, "s1": 0, "mtd": 197, "avg": "4.6",
+    }
+
+    logger.info("Sending test daily summary to Slack...")
+    post_daily_summary_to_slack(date_display, dummy_rows, dummy_totals)
+
+
 def send_test_message():
     """Post dummy reviews to Slack and Google Sheet to verify the full pipeline."""
     if not SLACK_WEBHOOK_URL and not SLACK_WEBHOOK_URL_2:
@@ -457,6 +752,8 @@ def send_test_message():
         logger.info("Logging test review to Google Sheet: %s", clinic)
         log_to_sheet(creds, clinic, review)
 
+    _test_daily_summary()
+
     logger.info("Done — check your Slack channels and Google Sheet.")
 
 
@@ -470,12 +767,26 @@ def main():
     parser.add_argument(
         "--test",
         action="store_true",
-        help="Post dummy reviews to Slack to verify message layout",
+        help="Post dummy reviews + daily summary to Slack to verify layout",
+    )
+    parser.add_argument(
+        "--daily-summary",
+        action="store_true",
+        help="Post daily review summary table to #google-reviews and exit",
     )
     args = parser.parse_args()
 
     if args.test:
         send_test_message()
+        return
+
+    if args.daily_summary:
+        if not SLACK_WEBHOOK_URL:
+            logger.error("SLACK_WEBHOOK_URL is not set — cannot post daily summary.")
+            sys.exit(1)
+        creds = authenticate()
+        accounts = get_accounts(creds)
+        send_daily_summary(creds, accounts)
         return
 
     logger.info("=" * 50)
