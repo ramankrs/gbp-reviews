@@ -468,16 +468,12 @@ def post_to_slack(location_title, review):
 
 def post_daily_summary_to_slack(date_display, clinic_rows, totals_row):
     """
-    Format and post the daily summary table to Slack Channel 1 (#google-reviews).
+    Format and post the daily summary table to both Slack channels.
 
     clinic_rows: list of dicts with keys:
         name, yesterday, s5, s4, s3, s2, s1, mtd, avg
     totals_row: same keys, representing column sums/weighted avg
     """
-    if not SLACK_WEBHOOK_URL:
-        logger.warning("SLACK_WEBHOOK_URL not set — daily summary not posted.")
-        return
-
     C = 16  # clinic column width (longest name: "Electronic City" = 15 chars)
 
     header_row = (
@@ -505,14 +501,26 @@ def post_daily_summary_to_slack(date_display, clinic_rows, totals_row):
     )
 
     payload = {"text": message}
-    try:
-        resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=15)
-        if resp.status_code != 200:
-            logger.warning("Daily summary Slack post failed (%s): %s", resp.status_code, resp.text)
-        else:
-            logger.info("Daily summary posted to #google-reviews.")
-    except requests.exceptions.RequestException as e:
-        logger.warning("Daily summary Slack request error: %s", e)
+
+    channels = [
+        ("Channel 1 (#google-reviews)", SLACK_WEBHOOK_URL),
+        ("Channel 2 (#gmb-reviews)",    SLACK_WEBHOOK_URL_2),
+    ]
+
+    for label, url in channels:
+        if not url:
+            logger.warning("Daily summary: %s webhook not set — skipped.", label)
+            continue
+        try:
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code != 200:
+                logger.warning(
+                    "Daily summary %s failed (%s): %s", label, resp.status_code, resp.text
+                )
+            else:
+                logger.info("Daily summary posted to %s.", label)
+        except requests.exceptions.RequestException as e:
+            logger.warning("Daily summary %s request error: %s", label, e)
 
 
 # ---------------------------------------------------------------------------
