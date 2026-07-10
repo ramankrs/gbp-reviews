@@ -1,0 +1,48 @@
+name: Daily Reviews Summary
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  daily-summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Restore cached token
+        id: cache-token
+        uses: actions/cache/restore@v4
+        with:
+          path: token.json
+          key: google-token-dummy
+          restore-keys: |
+            google-token-
+      - name: Fall back to token from secret
+        if: steps.cache-token.outputs.cache-hit != 'true'
+        run: echo '${{ secrets.GOOGLE_TOKEN }}' > token.json
+      - name: Post daily summary to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL_2: ${{ secrets.SLACK_WEBHOOK_URL_2 }}
+        run: python gbp_reviews.py --daily-summary
+      - name: Save refreshed token
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: token.json
+          key: google-token-daily-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Show log output
+        if: always()
+        run: |
+          echo "── reviews_log.txt ──"
+          cat reviews_log.txt 2>/dev/null || echo "(no log file)"
