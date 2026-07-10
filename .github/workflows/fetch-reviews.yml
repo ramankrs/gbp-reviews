@@ -12,7 +12,6 @@ name: Fetch GBP Reviews
 on:
   schedule:
     - cron: "0 */4 * * *"    # Review alerts every 4 hours
-    - cron: "30 2 * * *"     # Daily summary at 8:00 AM IST (2:30 AM UTC)
 
   # Allow manual trigger from the Actions tab (useful for testing)
   workflow_dispatch:
@@ -112,65 +111,3 @@ jobs:
           echo "── reviews_log.txt ──"
           cat reviews_log.txt 2>/dev/null || echo "(no log file)"
 
-# ---------------------------------------------------------------------------
-# Job 2: Post daily summary at 8:00 AM IST (2:30 AM UTC)
-# ---------------------------------------------------------------------------
-  daily-summary:
-    # Run on the 2:30 AM UTC cron or on manual dispatch
-    if: github.event.schedule == '30 2 * * *' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    concurrency:
-      group: gbp-daily-summary
-      cancel-in-progress: true
-
-    steps:
-      # ── 1. Check out the repo ──────────────────────────────────
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # ── 2. Set up Python ───────────────────────────────────────
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      # ── 3. Restore token.json ──────────────────────────────────
-      - name: Restore cached token
-        id: cache-token
-        uses: actions/cache/restore@v4
-        with:
-          path: token.json
-          key: google-token-dummy
-          restore-keys: |
-            google-token-
-
-      - name: Fall back to token from secret
-        if: steps.cache-token.outputs.cache-hit != 'true'
-        run: echo '${{ secrets.GOOGLE_TOKEN }}' > token.json
-
-      # ── 4. Post daily summary ──────────────────────────────────
-      - name: Post daily summary to Slack
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python gbp_reviews.py --daily-summary
-
-      # ── 5. Save refreshed token ────────────────────────────────
-      - name: Save refreshed token
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: token.json
-          key: google-token-daily-${{ github.run_id }}-${{ github.run_attempt }}
-
-      # ── 6. Print log output ────────────────────────────────────
-      - name: Show log output
-        if: always()
-        run: |
-          echo "── reviews_log.txt ──"
-          cat reviews_log.txt 2>/dev/null || echo "(no log file)"
