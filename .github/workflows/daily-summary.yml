@@ -2,7 +2,7 @@
 name: Daily Reviews Summary
 on:
   schedule:
-    - cron: "30 2 * * *"
+    - cron: "30 3 * * *"
   workflow_dispatch:
 permissions:
   contents: read
