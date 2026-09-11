@@ -2,6 +2,12 @@
 credentials.json
 token.json
 
+# Apps Script reference copy — has live Slack webhook URLs hardcoded
+apps-script/
+
+# Claude Code local skills/notes — internal ops docs, keep off the public repo
+.claude/
+
 # Runtime data
 processed_reviews.json
 reviews_log.txt
