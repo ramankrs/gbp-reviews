@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------
+# Keepalive — prevents GitHub's 60-day-inactivity auto-disable
+# ---------------------------------------------------------------
+# GitHub automatically disables scheduled (cron) workflows if the
+# repository has had no `git push` activity for 60 days. This repo
+# is maintained by automation with no regular human commits, so the
+# fetch-reviews and daily-summary schedules would otherwise silently
+# stop firing every couple of months.
+#
+# This job pushes a trivial empty commit well inside that window to
+# keep the repo "active" and the other schedules alive.
+# ---------------------------------------------------------------
+
+name: Keepalive
+
+on:
+  schedule:
+    - cron: "0 0 1 * *"   # 1st of every month
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Push empty commit to reset inactivity clock
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive commit (prevents 60-day workflow auto-disable)"
+          git push
