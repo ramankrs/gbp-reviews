@@ -817,10 +817,18 @@ def main():
         logger.info("--reset flag used: clearing tracked reviews")
         state = {"review_ids": set(), "last_run": None}
 
-    # Determine the cutoff date for "new" reviews
+    # Determine the cutoff date for "new" reviews.
+    # Only the very first run uses a time cutoff (to avoid backfilling all-time
+    # history). Every run after that relies solely on review_id dedup below —
+    # a wall-clock cutoff here would permanently drop any review that (a) isn't
+    # yet visible via the GBP API at the moment we check (indexing lag) and
+    # whose createTime falls before the next run's advanced cutoff, or
+    # (b) gets resurfaced/reinstated by Google with an old createTime but a
+    # fresh updateTime (seen in practice: a review from 2025 reappeared as
+    # "new" in the dashboard on 2026-10-03 with its original createTime intact).
     if state["last_run"]:
-        cutoff = datetime.fromisoformat(state["last_run"])
-        logger.info("Last run: %s — fetching reviews newer than this", state["last_run"])
+        cutoff = None
+        logger.info("Last run: %s — relying on review_id dedup for new reviews", state["last_run"])
     else:
         cutoff = datetime.now(timezone.utc) - timedelta(days=INITIAL_LOOKBACK_DAYS)
         logger.info("First run — fetching reviews from the last %d days", INITIAL_LOOKBACK_DAYS)
@@ -875,8 +883,8 @@ def main():
                 except (ValueError, AttributeError):
                     continue
 
-                # Skip reviews older than our cutoff
-                if review_time <= cutoff:
+                # Skip reviews older than our cutoff (first run only — see above)
+                if cutoff is not None and review_time <= cutoff:
                     continue
 
                 # This is a new review — post to Slack and log to Sheet!
