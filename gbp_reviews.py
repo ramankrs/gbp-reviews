@@ -528,6 +528,33 @@ def post_daily_summary_to_slack(date_display, clinic_rows, totals_row):
 # ---------------------------------------------------------------------------
 
 
+def load_sheet_keys(creds):
+    """
+    Fetch every (reviewer, rating, comment) triple already logged in the
+    Sheet. Used as a second, durable dedup check alongside review_ids —
+    the Sheet survives even if the GitHub Actions cache holding
+    processed_reviews.json is lost (e.g. a run cancelled by its timeout
+    before the cache-save step runs).
+    """
+    headers = {"Authorization": f"Bearer {creds.token}"}
+    url = f"{SHEETS_API_BASE}/{SPREADSHEET_ID}/values/{SHEET_NAME}!C:E"
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        rows = resp.json().get("values", [])
+    except requests.exceptions.RequestException as e:
+        logger.warning("Could not load Sheet for dedup check: %s", e)
+        return set()
+
+    keys = set()
+    for row in rows:
+        reviewer = row[0].strip() if len(row) > 0 else ""
+        rating = row[1].strip() if len(row) > 1 else ""
+        comment = row[2].strip() if len(row) > 2 else ""
+        keys.add((reviewer, rating, comment))
+    return keys
+
+
 def log_to_sheet(creds, location_title, review):
     """Append a review row to the Google Sheet."""
     star_count = STAR_COUNTS.get(review.get("starRating", ""), 0)
@@ -817,6 +844,9 @@ def main():
         logger.info("--reset flag used: clearing tracked reviews")
         state = {"review_ids": set(), "last_run": None}
 
+    # Durable second dedup check — see load_sheet_keys() docstring.
+    sheet_keys = load_sheet_keys(creds)
+
     # Determine the cutoff date for "new" reviews.
     # Only the very first run uses a time cutoff (to avoid backfilling all-time
     # history). Every run after that relies solely on review_id dedup below —
@@ -887,11 +917,26 @@ def main():
                 if cutoff is not None and review_time <= cutoff:
                     continue
 
+                # Skip if already logged in the Sheet, even if review_ids
+                # doesn't know about it (e.g. a prior run's cache-save never
+                # ran). Matches the exact row shape written in log_to_sheet().
+                star_count = STAR_COUNTS.get(review.get("starRating", ""), 0)
+                reviewer_name = review.get("reviewer", {}).get("displayName", "Anonymous").strip()
+                comment_text = review.get("comment", "").strip()
+                sheet_key = (reviewer_name, str(star_count), comment_text)
+                if sheet_key in sheet_keys:
+                    state["review_ids"].add(review_id)
+                    continue
+
                 # This is a new review — post to Slack and log to Sheet!
                 post_to_slack(loc_title, review)
                 log_to_sheet(creds, loc_title, review)
                 state["review_ids"].add(review_id)
                 new_count += 1
+
+                # Persist immediately so a crash/timeout mid-run can't cause
+                # a review we already posted to be re-posted on the next run.
+                save_processed(state)
 
             total_new_reviews += new_count
             if new_count:
