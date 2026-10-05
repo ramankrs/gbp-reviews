@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -556,7 +557,16 @@ def load_sheet_keys(creds):
 
 
 def log_to_sheet(creds, location_title, review):
-    """Append a review row to the Google Sheet."""
+    """
+    Append a review row to the Google Sheet, then separately stamp the
+    review's actual createTime into column J ("Review Timestamp").
+
+    Columns A-G are appended as before — H (Mapped Clinic) and I (Date) are
+    live array formulas in the Sheet and must never be touched by this
+    script. Review Timestamp is written in a second, surgical update to
+    column J only, once we know which row the append landed on, so there's
+    no risk of colliding with those formulas' auto-expansion.
+    """
     star_count = STAR_COUNTS.get(review.get("starRating", ""), 0)
     reviewer = review.get("reviewer", {}).get("displayName", "Anonymous")
     comment = review.get("comment", "").strip()
@@ -586,14 +596,50 @@ def log_to_sheet(creds, location_title, review):
         resp = requests.post(
             url, headers=headers, params=params, json=body, timeout=15
         )
-        if resp.status_code == 200:
-            logger.info("  → Logged to Google Sheet")
-        else:
+        if resp.status_code != 200:
             logger.warning(
                 "  Sheet append failed (%s): %s", resp.status_code, resp.text
             )
+            return
+        logger.info("  → Logged to Google Sheet")
     except requests.exceptions.RequestException as e:
         logger.warning("  Sheet append error: %s", e)
+        return
+
+    updated_range = resp.json().get("updates", {}).get("updatedRange", "")
+    match = re.search(r"![A-Z]+(\d+):", updated_range)
+    if not match:
+        logger.warning(
+            "  Could not parse row number from append response (%s) — "
+            "skipping Review Timestamp column", updated_range
+        )
+        return
+    row_number = match.group(1)
+
+    create_time_str = review.get("createTime", "")
+    try:
+        review_dt_ist = datetime.fromisoformat(
+            create_time_str.replace("Z", "+00:00")
+        ).astimezone(IST)
+        review_timestamp = review_dt_ist.strftime("%b %d, %Y %I:%M %p")
+    except (ValueError, AttributeError):
+        review_timestamp = create_time_str  # fall back to the raw value
+
+    update_url = f"{SHEETS_API_BASE}/{SPREADSHEET_ID}/values/{SHEET_NAME}!J{row_number}"
+    try:
+        resp = requests.put(
+            update_url,
+            headers=headers,
+            params={"valueInputOption": "USER_ENTERED"},
+            json={"values": [[review_timestamp]]},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "  Review Timestamp write failed (%s): %s", resp.status_code, resp.text
+            )
+    except requests.exceptions.RequestException as e:
+        logger.warning("  Review Timestamp write error: %s", e)
 
 
 # ---------------------------------------------------------------------------
