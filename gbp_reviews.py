@@ -54,6 +54,13 @@ LOG_FILE = SCRIPT_DIR / "reviews_log.txt"
 # How far back to look on the very first run (days)
 INITIAL_LOOKBACK_DAYS = 7
 
+# A review older than this (by its own createTime) never gets a Slack alert,
+# even the first time we ever see it — guards against Google resurfacing an
+# old review (fresh updateTime, stale createTime) showing up as "New Review"
+# months or years late. It's still logged to the Sheet and marked processed
+# either way, so Review Timestamp stays accurate and it's never retried.
+SLACK_MAX_AGE_DAYS = 42  # 6 weeks
+
 # Google Business Profile API base URL
 GBP_API_BASE = "https://mybusinessbusinessinformation.googleapis.com/v1"
 GBP_ACCOUNT_API = "https://mybusinessaccountmanagement.googleapis.com/v1"
@@ -944,8 +951,20 @@ def main():
                     state["review_ids"].add(review_id)
                     continue
 
-                # This is a new review — post to Slack and log to Sheet!
-                post_to_slack(loc_title, review)
+                # This is a new review — log it to the Sheet always, but only
+                # alert Slack if it's recent. An old createTime here means
+                # Google only just surfaced it to us (indexing lag or a
+                # resurfaced/reinstated review) — real for record-keeping,
+                # but stale news, not something the team needs pinged about.
+                slack_cutoff = datetime.now(timezone.utc) - timedelta(days=SLACK_MAX_AGE_DAYS)
+                if review_time >= slack_cutoff:
+                    post_to_slack(loc_title, review)
+                else:
+                    logger.info(
+                        "    → Skipping Slack alert (review is %d+ days old): %s",
+                        SLACK_MAX_AGE_DAYS,
+                        reviewer_name,
+                    )
                 log_to_sheet(creds, loc_title, review)
                 state["review_ids"].add(review_id)
                 new_count += 1
@@ -956,7 +975,7 @@ def main():
 
             total_new_reviews += new_count
             if new_count:
-                logger.info("    → %d new review(s) posted to Slack", new_count)
+                logger.info("    → %d new review(s) found and logged", new_count)
             else:
                 logger.info("    → No new reviews")
 
